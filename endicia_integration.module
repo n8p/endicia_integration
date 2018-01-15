@@ -1,0 +1,186 @@
+<?php
+/**
+ * @file
+ * Defines the Endicia shipping method and services for Drupal Commerce.
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function endicia_integration_menu() {
+  $items = array();
+  $items['admin/commerce/config/shipping/methods/endicia/edit'] = array(
+    'title' => 'Edit',
+    'description' => 'Adjust Endicia shipping settings.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('endicia_integration_settings_form'),
+    'access arguments' => array('administer shipping'),
+    'file' => 'includes/endicia_integration.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'context' => MENU_CONTEXT_INLINE,
+    'weight' => 0,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_commerce_shipping_method_info().
+ */
+function endicia_integration_commerce_shipping_method_info() {
+  return array(
+    'endicia' => array(
+      'title' => t('Endicia'),
+      'description' => t('Endicia quote services.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_commerce_shipping_service_info().
+ *
+ * @return array
+ *   An array of shipping services
+ */
+function endicia_integration_commerce_shipping_service_info() {
+  $shipping_services = array();
+
+  $shipping_services['endicia_rate_quote'] = array(
+    'title' => t(variable_get('endicia_integration_shipping_string', 'U.S.P.S. Parcel Select')),
+    'description' => t(variable_get('endicia_integration_shipping_string', 'U.S.P.S. Parcel Select')),
+    'display_title' => t(variable_get('endicia_integration_shipping_string', 'U.S.P.S. Parcel Select')),
+    'shipping_method' => 'endicia',
+    'price_component' => 'shipping',
+    'callbacks' => array(
+      'rate' => 'endicia_integration_rate',
+    ),
+  );
+
+  return $shipping_services;
+}
+
+/**
+ * Returns a base price array for a shipping service calculated for the order.
+ *
+ * @param array $service
+ *   An array describing the shipping service.
+ * @param object $order
+ *   The order object.
+ *
+ * @return array
+ *   The service rates returned from Endicia.
+ */
+function endicia_integration_rate($service, $order) {
+  // Attempt to recover cached shipping rates.
+  $rates = '';
+  $rates = commerce_shipping_rates_cache_get('endicia', $order, variable_get('commerce_usps_rates_timeout', 0));
+
+  // If no cached rates were found or they have expired.
+  if (!is_array($rates) && endicia_integration_validate_order($order)) {
+
+    // Load files required for building requests.
+    require_once dirname(__FILE__) . '/includes/endicia_integration.xml.inc';
+
+    $shipping_address = endicia_integration_get_order_shipping_address($order);
+
+    // Determine which type of rate request to submit.
+    $rates = endicia_integration_rate_request($order, $shipping_address);
+
+    commerce_shipping_rates_cache_set('endicia', $order, (array) $rates);
+  }
+
+  // Return the rate for the requested service or FALSE if not found.
+  return isset($rates[$service['name']]) ? $rates[$service['name']] : FALSE;
+}
+
+/**
+ * Validate that the order can return a successful rate request.
+ *
+ * @param object $order
+ *   The order object.
+ *
+ * @return bool
+ *   Returns TRUE if the order passes validation.
+ */
+function endicia_integration_validate_order($order) {
+  $shipping_address = endicia_integration_get_order_shipping_address($order);
+
+  // We have to have a shipping address to get rates.
+  if (empty($shipping_address)) {
+    return FALSE;
+  }
+
+  // US shipping addresses require a zipcode.
+  if ($shipping_address['country'] == 'US' && empty($shipping_address['postal_code'])) {
+    return FALSE;
+  }
+
+  // Make sure the order is shippable.
+  if (!endicia_integration_get_order_weight($order)) {
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+/**
+ * Determine the weight of the order.
+ */
+function endicia_integration_get_order_weight($order) {
+  // Use commerce physical to determine the order weight.
+  $weight = commerce_physical_order_weight($order, 'oz');
+
+  // If order contains no weight skip sending request to usps.
+  if (!is_array($weight) || $weight['weight'] == NULL) {
+    return FALSE;
+  }
+
+  return $weight['weight'];
+}
+
+/**
+ * Get the shipping address of the order.
+ */
+function endicia_integration_get_order_shipping_address($order) {
+  $shipping_address = array();
+  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+
+  // Determine the shipping profile reference field name for the order.
+  $field_name = commerce_physical_order_shipping_field_name($order);
+
+  // Prepare the shipping address for use in the request.
+  if (!empty($order_wrapper->{$field_name}->commerce_customer_address)) {
+    $shipping_address = $order_wrapper->{$field_name}->commerce_customer_address->value();
+  }
+
+  return $shipping_address;
+}
+
+/**
+ * Produce the shipping value for each line item.
+ */
+function endicia_integration_get_shipment_value($order) {
+  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+  $shipment_value = 0;
+
+  // Loop over each line item on the order.
+  foreach ($order_wrapper->commerce_line_items as $line_item_wrapper) {
+    if (commerce_physical_line_item_shippable($line_item_wrapper->value())) {
+      $line_item_total = $line_item_wrapper->commerce_total->value();
+
+      // Increment the insurance value from the line items value.
+      $shipment_value += $line_item_total['amount'];
+    }
+  }
+
+  return $shipment_value;
+}
+
+/**
+ * Helper function to log Endicia messages.
+ */
+function endicia_integration_log($message, $variables = array(), $severity = WATCHDOG_NOTICE) {
+  if (variable_get('endicia_integration_log')) {
+    watchdog('endicia_integration', $message, $variables, $severity);
+  }
+}

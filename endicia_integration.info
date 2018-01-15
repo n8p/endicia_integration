@@ -1,0 +1,7 @@
+name = Endicia Integration
+description = Adds Endicia shipping quote calculations.
+core = 7.x
+package = Custom Modules
+dependencies[] = commerce
+dependencies[] = commerce_shipping
+dependencies[] = commerce_physical
